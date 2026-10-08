@@ -27,7 +27,25 @@ def _setup_tls():
         pass
 
 
+def _setup_dpi():
+    """Windows: work in physical pixels. A DPI-unaware process gets scaled window
+    coordinates on 125-200 % displays, so window captures would crop the wrong area
+    (and Tk text would be blurry)."""
+    if sys.platform != "win32":
+        return
+    import ctypes
+
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)  # per-monitor
+    except Exception:
+        try:
+            ctypes.windll.user32.SetProcessDPIAware()
+        except Exception:
+            pass
+
+
 def main():
+    _setup_dpi()
     _setup_tls()
     _setup_logging()
     if "--update-now" in sys.argv:  # check + download + hand over (tests/CI)
