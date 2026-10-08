@@ -129,8 +129,9 @@ def ocr(img):
         engine = _get_engine()
         if engine is None:
             return ""
-        if max(img.size) > engine.max_image_dimension:
-            scale = engine.max_image_dimension / max(img.size)
+        limit = _max_dimension()
+        if max(img.size) > limit:
+            scale = limit / max(img.size)
             img = img.resize((int(img.width * scale), int(img.height * scale)))
         rgba = img.convert("RGBA")
         writer = DataWriter()
@@ -142,6 +143,15 @@ def ocr(img):
     except Exception:
         log.warning("Windows OCR failed", exc_info=True)
         return ""
+
+
+def _max_dimension():
+    try:
+        from winrt.windows.media.ocr import OcrEngine
+
+        return int(OcrEngine.max_image_dimension)  # a static property in WinRT
+    except Exception:
+        return 2600
 
 
 async def _recognize(engine, bitmap):
