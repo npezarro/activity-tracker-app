@@ -233,6 +233,25 @@ jobs:
           $app --smoke-ui "$PWD/smoke.json"
           cat smoke.json
           grep -q '"ok": true' smoke.json
+      - name: Test live capture (macOS)
+        # Run the real app (it starts the Swift helper) for ~30 s and check focus + OCR events landed.
+        if: runner.os == 'macOS'
+        timeout-minutes: 5
+        run: |
+          d=unzipped/ActivityTracker/data
+          echo '{"idle_seconds": 100000000, "setup_seen": true}' > $d/config.json
+          unzipped/ActivityTracker/ActivityTracker.app/Contents/MacOS/ActivityTracker &
+          pid=$!
+          sleep 6
+          open -a TextEdit
+          sleep 25
+          kill $pid || true
+          sleep 3
+          ls -la $d/spool || true
+          tail -20 $d/capture.log || true
+          cat $d/spool/events-*.jsonl | head -8 | cut -c1-200
+          grep -q '"type":"focus"' $d/spool/events-*.jsonl || { echo "no focus events captured"; exit 1; }
+          if pgrep -f "Frameworks/capture/activity-capture" >/dev/null; then echo "helper outlived the app"; exit 1; fi
       - name: Test dmg (macOS)
         if: runner.os == 'macOS'
         timeout-minutes: 8
