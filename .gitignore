@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+build/
+dist/
+pkg/
+data/
+*.spec.bak
+.venv/
+venv/
+activitytracker/_local_*.py
+context.md
+progress.md

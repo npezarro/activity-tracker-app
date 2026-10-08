@@ -1,0 +1,307 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            artifact: ActivityTracker-windows-x64
+          - os: macos-14
+            artifact: ActivityTracker-macos-arm64
+          - os: macos-15-intel
+            artifact: ActivityTracker-macos-intel
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller==6.22.3 pytest
+      - name: Unit tests
+        run: python -m pytest -q tests
+      - name: Capture helper + icon (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          mkdir -p build/icon.iconset
+          swiftc -O -o build/activity-capture capture/macos/capture-daemon.swift
+          file build/activity-capture
+          for s in 16 32 128 256 512; do
+            sips -z $s $s assets/icon.png --out build/icon.iconset/icon_${s}x${s}.png >/dev/null
+            sips -z $((s*2)) $((s*2)) assets/icon.png --out build/icon.iconset/icon_${s}x${s}@2x.png >/dev/null
+          done
+          iconutil -c icns build/icon.iconset -o build/icon.icns
+      - name: Build
+        run: pyinstaller --noconfirm --clean activitytracker.spec
+      - name: Version
+        id: ver
+        shell: bash
+        run: echo "version=$(python -c 'import activitytracker; print(activitytracker.__version__)')" >> "$GITHUB_OUTPUT"
+      - name: Is there a published release to update to?
+        id: rel
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          code=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $GITHUB_TOKEN" https://api.github.com/repos/${{ github.repository }}/releases/latest)
+          if [ "$code" = 200 ]; then echo "exists=true" >> "$GITHUB_OUTPUT"; else echo "exists=false" >> "$GITHUB_OUTPUT"; echo "::notice::no release yet; skipping the in-app update test"; fi
+
+      # ---------------- Windows: portable zip + installer ----------------
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force pkg | Out-Null
+          Copy-Item -Recurse dist/ActivityTracker pkg/ActivityTracker
+          Copy-Item README.md pkg/ActivityTracker/README.md
+          New-Item -ItemType Directory -Force pkg/ActivityTracker/data | Out-Null
+          "Activity Tracker keeps its settings, database and summaries in this folder, so the whole app stays portable. Delete the folder to reset." | Set-Content pkg/ActivityTracker/data/README.txt
+          Compress-Archive -Path pkg/ActivityTracker -DestinationPath "${{ matrix.artifact }}.zip"
+          if (-not (Get-Command iscc -ErrorAction SilentlyContinue)) { choco install innosetup -y --no-progress | Out-Null }
+          $iscc = (Get-Command iscc -ErrorAction SilentlyContinue).Source
+          if (-not $iscc) { $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" }
+          & $iscc /Qp "/DAppVersion=${{ steps.ver.outputs.version }}" "/DSourceDir=$PWD\dist\ActivityTracker" installer\activitytracker.iss
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          Move-Item dist/ActivityTracker-Setup-x64.exe ActivityTracker-Setup-x64.exe
+      - name: Test portable zip (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Expand-Archive "${{ matrix.artifact }}.zip" -DestinationPath unzipped
+          $exe = Resolve-Path unzipped/ActivityTracker/ActivityTracker.exe
+          $p = Start-Process -FilePath $exe -ArgumentList "--selftest","--out","$PWD/selftest.json" -Wait -PassThru
+          Get-Content selftest.json
+          if ($p.ExitCode -ne 0) { exit 1 }
+          $sel = Get-Content selftest.json | ConvertFrom-Json
+          if ($sel.data_dir -ne (Join-Path (Resolve-Path unzipped/ActivityTracker) "data")) { Write-Error "zip is not portable: $($sel.data_dir)"; exit 1 }
+          $p = Start-Process -FilePath $exe -ArgumentList "--smoke-ui","$PWD/smoke.json" -Wait -PassThru
+          Get-Content smoke.json
+          if (-not (Select-String -Path smoke.json -Pattern '"ok": true' -Quiet)) { exit 1 }
+      - name: Test live capture (Windows)
+        # Run the real app for ~25 s and check the capture loop wrote focus events to the spool.
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $exe = Resolve-Path unzipped/ActivityTracker/ActivityTracker.exe
+          # CI has had no keyboard/mouse input since boot, so lift the idle cut-off for this run
+          '{"idle_seconds": 100000000, "setup_seen": true}' | Set-Content unzipped/ActivityTracker/data/config.json
+          $p = Start-Process -FilePath $exe -PassThru
+          Start-Sleep -Seconds 5
+          Start-Process notepad.exe
+          Start-Sleep -Seconds 25
+          Stop-Process -Id $p.Id -Force
+          Get-Process notepad -ErrorAction SilentlyContinue | Stop-Process -Force
+          $spool = "unzipped/ActivityTracker/data/spool"
+          Get-ChildItem $spool
+          $events = Get-Content (Join-Path $spool "events-*.jsonl") -ErrorAction SilentlyContinue
+          $events | Select-Object -First 10
+          Get-Content unzipped/ActivityTracker/data/activitytracker.log -Tail 30 -ErrorAction SilentlyContinue
+          if (-not ($events | Select-String '"type": "focus"' -Quiet)) { Write-Error "no focus events captured"; exit 1 }
+      - name: Test installer (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath .\ActivityTracker-Setup-x64.exe -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART","/TASKS=desktopicon" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { Write-Error "installer exit $($p.ExitCode)"; exit 1 }
+          $app = Join-Path $env:LOCALAPPDATA "Programs\ActivityTracker\ActivityTracker.exe"
+          if (-not (Test-Path $app)) { Write-Error "not installed at $app"; exit 1 }
+          $p = Start-Process -FilePath $app -ArgumentList "--selftest","--out","$PWD/installed.json" -Wait -PassThru
+          Get-Content installed.json
+          if ($p.ExitCode -ne 0) { exit 1 }
+          $sel = Get-Content installed.json | ConvertFrom-Json
+          if ($sel.data_dir -ne (Join-Path $env:LOCALAPPDATA "ActivityTracker")) { Write-Error "installed copy should use %LOCALAPPDATA%\ActivityTracker, got $($sel.data_dir)"; exit 1 }
+          $un = Join-Path $env:LOCALAPPDATA "Programs\ActivityTracker\unins000.exe"
+          $p = Start-Process -FilePath $un -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART" -Wait -PassThru
+          Start-Sleep -Seconds 3
+          if (Test-Path $app) { Write-Error "uninstall left $app"; exit 1 }
+          Write-Host "install -> selftest -> uninstall OK"
+      - name: Test in-app update (Windows installer + portable)
+        if: runner.os == 'Windows' && steps.rel.outputs.exists == 'true'
+        shell: pwsh
+        timeout-minutes: 15
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          $latest = (Invoke-RestMethod -Headers @{Authorization = "Bearer $env:GITHUB_TOKEN"} https://api.github.com/repos/${{ github.repository }}/releases/latest).tag_name.TrimStart("v")
+          Write-Host "latest release: $latest"
+          function Wait-Version($exe, $want) {
+            for ($i = 0; $i -lt 60; $i++) {
+              Start-Sleep -Seconds 5
+              if (Test-Path $exe) {
+                $p = Start-Process -FilePath $exe -ArgumentList "--selftest","--out","$PWD/v.json" -PassThru; $p.WaitForExit()
+                if (Test-Path v.json) { $v = (Get-Content v.json | ConvertFrom-Json).version; Remove-Item v.json; if ($v -eq $want) { return $true } }
+              }
+            }
+            return $false
+          }
+          $p = Start-Process -FilePath .\ActivityTracker-Setup-x64.exe -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART" -Wait -PassThru
+          $app = Join-Path $env:LOCALAPPDATA "Programs\ActivityTracker\ActivityTracker.exe"
+          New-Item -ItemType Directory -Force (Join-Path $env:LOCALAPPDATA "ActivityTracker") | Out-Null
+          "keep me" | Set-Content (Join-Path $env:LOCALAPPDATA "ActivityTracker\marker.txt")
+          $env:ACTIVITYTRACKER_PRETEND_VERSION = "0.0.1"
+          $p = Start-Process -FilePath $app -ArgumentList "--update-now","$PWD/upd.json" -PassThru; $p.WaitForExit()
+          $env:ACTIVITYTRACKER_PRETEND_VERSION = $null
+          Get-Content upd.json
+          if (-not (Select-String -Path upd.json -Pattern '"handed_over": true' -Quiet)) { Write-Error "installer update not started"; exit 1 }
+          if (-not (Wait-Version $app $latest)) { Write-Error "installed copy never reached $latest"; exit 1 }
+          if (-not (Test-Path (Join-Path $env:LOCALAPPDATA "ActivityTracker\marker.txt"))) { Write-Error "update lost user data"; exit 1 }
+          Get-Process ActivityTracker -ErrorAction SilentlyContinue | Stop-Process -Force
+          Start-Process -FilePath (Join-Path $env:LOCALAPPDATA "Programs\ActivityTracker\unins000.exe") -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES" -Wait
+          Expand-Archive "${{ matrix.artifact }}.zip" -DestinationPath portable-upd
+          $pexe = Resolve-Path portable-upd/ActivityTracker/ActivityTracker.exe
+          "keep me" | Set-Content portable-upd/ActivityTracker/data/marker.txt
+          $env:ACTIVITYTRACKER_PRETEND_VERSION = "0.0.1"
+          $p = Start-Process -FilePath $pexe -ArgumentList "--update-now","$PWD/upd2.json" -PassThru; $p.WaitForExit()
+          $env:ACTIVITYTRACKER_PRETEND_VERSION = $null
+          Get-Content upd2.json
+          if (-not (Wait-Version $pexe $latest)) { Write-Error "portable copy never reached $latest"; exit 1 }
+          if (-not (Test-Path portable-upd/ActivityTracker/data/marker.txt)) { Write-Error "update lost the portable data folder"; exit 1 }
+          Get-Process ActivityTracker -ErrorAction SilentlyContinue | Stop-Process -Force
+          Write-Host "installer + portable copies updated to $latest, data kept"
+
+      # ---------------- macOS: portable zip + dmg ----------------
+      - name: Package (macOS)
+        if: runner.os == 'macOS'
+        env:
+          SELF_P12: ${{ secrets.MACOS_SELF_SIGN_P12 }}
+          SELF_P12_PASSWORD: ${{ secrets.MACOS_SELF_SIGN_PASSWORD }}
+        run: |
+          if [ -n "$SELF_P12" ]; then
+            # Every release is signed with the same self-signed certificate, so macOS keeps the
+            # Screen Recording / Accessibility grants across updates (ad-hoc signatures change
+            # every build and silently orphan them). Gatekeeper still warns: not notarized.
+            kc="$RUNNER_TEMP/selfsign.keychain-db"; kcpass=$(uuidgen)
+            security create-keychain -p "$kcpass" "$kc"
+            security set-keychain-settings -lut 21600 "$kc"
+            security unlock-keychain -p "$kcpass" "$kc"
+            echo "$SELF_P12" | base64 --decode > "$RUNNER_TEMP/self.p12"
+            security import "$RUNNER_TEMP/self.p12" -P "$SELF_P12_PASSWORD" -A -f pkcs12 -k "$kc"
+            security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$kcpass" "$kc" >/dev/null
+            security list-keychains -d user -s "$kc" $(security list-keychains -d user | tr -d '"')
+            identity="Activity Tracker Self-Signed"
+            export SIGN_TIMESTAMP=none
+          else
+            echo "::warning::MACOS_SELF_SIGN_P12 not set: ad-hoc signing, permissions won't survive updates"
+            identity="-"
+          fi
+          scripts/macos_sign.sh "$identity" dist/ActivityTracker.app
+          codesign -d --requirements - dist/ActivityTracker.app 2>&1 | grep designated || true
+          mkdir -p pkg/ActivityTracker/data
+          cp -R dist/ActivityTracker.app pkg/ActivityTracker/
+          cp README.md pkg/ActivityTracker/README.md
+          echo "Activity Tracker keeps its settings, database and summaries in this folder, so the whole app stays portable. Delete the folder to reset." > pkg/ActivityTracker/data/README.txt
+          ditto -c -k --sequesterRsrc --keepParent pkg/ActivityTracker "${{ matrix.artifact }}.zip"
+          mkdir -p dmgroot
+          cp -R dist/ActivityTracker.app dmgroot/
+          ln -s /Applications dmgroot/Applications
+          cat > "dmgroot/Read me first.txt" <<'TXT'
+          1. Drag ActivityTracker into Applications.
+          2. Activity Tracker isn't notarized by Apple, so the first time you open it macOS will
+             refuse. Open System Settings > Privacy & Security, scroll down and click
+             "Open Anyway" next to ActivityTracker (or run: xattr -dr com.apple.quarantine /Applications/ActivityTracker.app).
+          3. When asked, allow Screen Recording and Accessibility for Activity Tracker, then use
+             "Restart capture" in its Capture & privacy settings.
+          TXT
+          for attempt in 1 2 3 4 5; do
+            if hdiutil create -volname "Activity Tracker" -srcfolder dmgroot -ov -format UDZO "${{ matrix.artifact }}.dmg"; then break; fi
+            if [ "$attempt" = 5 ]; then exit 1; fi
+            echo "hdiutil busy, retrying ($attempt)"; sleep $((attempt * 5))
+          done
+      - name: Test portable zip (macOS)
+        if: runner.os == 'macOS'
+        timeout-minutes: 8
+        run: |
+          ditto -x -k "${{ matrix.artifact }}.zip" unzipped
+          app=unzipped/ActivityTracker/ActivityTracker.app/Contents/MacOS/ActivityTracker
+          $app --selftest --out "$PWD/selftest.json" || { cat selftest.json; exit 1; }
+          cat selftest.json
+          python -c "import json,os,sys; d=json.load(open('selftest.json'))['data_dir']; sys.exit(0 if os.path.realpath(d)==os.path.realpath('unzipped/ActivityTracker/data') else 'zip not portable: '+d)"
+          $app --smoke-ui "$PWD/smoke.json"
+          cat smoke.json
+          grep -q '"ok": true' smoke.json
+      - name: Test dmg (macOS)
+        if: runner.os == 'macOS'
+        timeout-minutes: 8
+        run: |
+          hdiutil attach "${{ matrix.artifact }}.dmg" -nobrowse -mountpoint /tmp/atdmg
+          test -L /tmp/atdmg/Applications && test -d /tmp/atdmg/ActivityTracker.app
+          cp -R /tmp/atdmg/ActivityTracker.app /tmp/ActivityTracker.app
+          hdiutil detach /tmp/atdmg
+          codesign --verify --deep /tmp/ActivityTracker.app
+          /tmp/ActivityTracker.app/Contents/MacOS/ActivityTracker --selftest --out "$PWD/installed.json"
+          cat installed.json
+          python -c "import json,os,sys; d=json.load(open('installed.json'))['data_dir']; sys.exit(0 if d==os.path.expanduser('~/Library/Application Support/ActivityTracker') else 'installed app should use Application Support, got '+d)"
+      - name: Test in-app update (macOS)
+        if: runner.os == 'macOS' && steps.rel.outputs.exists == 'true'
+        timeout-minutes: 12
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          latest=$(curl -s -H "Authorization: Bearer $GITHUB_TOKEN" https://api.github.com/repos/${{ github.repository }}/releases/latest | python3 -c "import json,sys; print(json.load(sys.stdin)['tag_name'].lstrip('v'))")
+          echo "latest release: $latest"
+          ditto -x -k "${{ matrix.artifact }}.zip" mac-upd
+          echo "keep me" > mac-upd/ActivityTracker/data/marker.txt
+          app="$PWD/mac-upd/ActivityTracker/ActivityTracker.app"
+          ACTIVITYTRACKER_PRETEND_VERSION=0.0.1 "$app/Contents/MacOS/ActivityTracker" --update-now "$PWD/upd.json"
+          cat upd.json; grep -q '"handed_over": true' upd.json
+          for i in $(seq 1 60); do
+            sleep 5
+            if [ -x "$app/Contents/MacOS/ActivityTracker" ] && "$app/Contents/MacOS/ActivityTracker" --selftest --out "$PWD/v.json" >/dev/null 2>&1; then
+              v=$(python3 -c "import json; print(json.load(open('v.json'))['version'])")
+              [ "$v" = "$latest" ] && break
+            fi
+          done
+          [ "$v" = "$latest" ] || { echo "mac copy never reached $latest (last: $v)"; exit 1; }
+          test -f mac-upd/ActivityTracker/data/marker.txt || { echo "update lost the data folder"; exit 1; }
+          pkill -f "ActivityTracker.app/Contents/MacOS/ActivityTracker" || true
+          echo "mac copy updated to $latest, data kept"
+      - name: Show app log
+        if: always()
+        shell: bash
+        run: cat unzipped/ActivityTracker/data/activitytracker.log 2>/dev/null || true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            ${{ matrix.artifact }}.zip
+            ${{ matrix.artifact }}.dmg
+            ActivityTracker-Setup-x64.exe
+          if-no-files-found: ignore
+          retention-days: 30
+
+  # One release, published only after every platform built and passed its tests.
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Check all six files are there
+        run: |
+          ls -la dist
+          for f in ActivityTracker-Setup-x64.exe ActivityTracker-windows-x64.zip ActivityTracker-macos-arm64.zip \
+                   ActivityTracker-macos-arm64.dmg ActivityTracker-macos-intel.zip ActivityTracker-macos-intel.dmg; do
+            test -s "dist/$f" || { echo "missing $f"; exit 1; }
+          done
+      - uses: softprops/action-gh-release@v2
+        with:
+          fail_on_unmatched_files: true
+          files: dist/*

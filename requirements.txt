@@ -1,0 +1,12 @@
+keyring==25.7.0
+certifi>=2024.2.2  # CA bundle for HTTPS on macOS (see __main__._setup_tls)
+Pillow>=10
+pystray==0.19.5; sys_platform == "win32"
+winrt-runtime>=2.3,<4; sys_platform == "win32"
+winrt-Windows.Foundation>=2.3,<4; sys_platform == "win32"
+winrt-Windows.Foundation.Collections>=2.3,<4; sys_platform == "win32"
+winrt-Windows.Globalization>=2.3,<4; sys_platform == "win32"
+winrt-Windows.Graphics.Imaging>=2.3,<4; sys_platform == "win32"
+winrt-Windows.Media.Ocr>=2.3,<4; sys_platform == "win32"
+winrt-Windows.Storage.Streams>=2.3,<4; sys_platform == "win32"
+pyobjc-framework-Cocoa; sys_platform == "darwin"

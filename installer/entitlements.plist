@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Hardened runtime (required for notarization) blocks these unless granted: -->
+    <!-- asking browsers (Apple Events) whether the front window is private/incognito -->
+    <key>com.apple.security.automation.apple-events</key>
+    <true/>
+    <!-- Python's ctypes/libffi create executable memory -->
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+    <!-- PyInstaller loads bundled .so/.dylib files; allow them regardless of signer -->
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+</dict>
+</plist>

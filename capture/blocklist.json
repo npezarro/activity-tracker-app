@@ -1,0 +1,42 @@
+{
+  "_comment": "Windows that are never captured: a match means zero bytes are written for that window (no title, no text, no screenshot). procNames match the app name or bundle id (case-insensitive substring). titlePatterns are regexes tested against the window title; a leading (?i) makes one case-insensitive. Edit this copy from Settings; changes apply within a minute (Windows) or an hour (macOS, or immediately after Restart capture).",
+  "procNames": [
+    "1Password",
+    "com.1password",
+    "Bitwarden",
+    "KeePassXC",
+    "Keychain Access",
+    "Dashlane",
+    "LastPass",
+    "Authenticator"
+  ],
+  "titlePatterns": [
+    "(?i)\\b1password\\b",
+    "(?i)\\bbitwarden\\b",
+    "(?i)password manager",
+    "(?i)\\bsign ?in\\b",
+    "(?i)\\blog ?in\\b",
+    "(?i)two[- ]factor",
+    "(?i)\\b2fa\\b",
+    "(?i)one[- ]time (pass|code)",
+    "(?i)verify your identity",
+    "(?i)\\bbank(ing)?\\b",
+    "(?i)\\bchase\\b",
+    "(?i)wells fargo",
+    "(?i)bank of america",
+    "(?i)american express|amex",
+    "(?i)\\bfidelity\\b",
+    "(?i)\\bvanguard\\b",
+    "(?i)\\bschwab\\b",
+    "(?i)morgan stanley",
+    "(?i)\\bcapital one\\b",
+    "(?i)\\bcitibank|citi\\b",
+    "(?i)\\bpaypal\\b",
+    "(?i)\\bvenmo\\b",
+    "(?i)\\brobinhood\\b",
+    "(?i)\\bcoinbase\\b",
+    "(?i)\\bincognito\\b",
+    "(?i)private browsing",
+    "(?i)\\binprivate\\b"
+  ]
+}
