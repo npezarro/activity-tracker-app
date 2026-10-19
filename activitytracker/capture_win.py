@@ -19,7 +19,7 @@ import os
 import threading
 import time
 
-from . import blocklist, config, diff, pause
+from . import blocklist, config, diff, pause, power
 from .scrub import scrub
 
 log = logging.getLogger(__name__)
@@ -242,6 +242,7 @@ class Capture:
         last_frame_hash, last_frame_text = [], ""
         bl, bl_loaded, bl_path = None, 0, None
         last_prune = 0
+        pw, pw_checked = power.AC, 0
         self.problem = "" if ocr_available() else "Windows OCR unavailable (add an OCR language in Windows Settings)"
         while not self._stop.is_set():
             self.last_tick = time.time()
@@ -254,6 +255,13 @@ class Capture:
             if now - last_prune > 3600:
                 self._prune(spool)
                 last_prune = now
+            if now - pw_checked > 30:
+                pw_checked = now
+                p = power.state(spool)
+                if p != pw:
+                    pw = p
+                    log.info("power: %s (OCR every %ss, frames every %ss)", pw, *power.intervals(cfg, pw))
+            ocr_every, frame_every = power.intervals(cfg, pw)
             paused = pause.state(spool) is not None or not cfg.get("capture_enabled", True)
             if paused or is_locked() or idle_seconds() > cfg["idle_seconds"]:
                 if focus:
@@ -284,12 +292,12 @@ class Capture:
                 last_frame_hash, last_frame_text, last_ocr_text = [], "", ""
             if cfg["vision_mode"] != "off":
                 gap = now - last_frame_at
-                if gap >= cfg["frame_interval_s"] or (changed and gap >= FRAME_MIN_GAP):
+                if gap >= frame_every or (changed and gap >= FRAME_MIN_GAP):
                     last_frame_at = now
                     saved = self._frame(cfg, spool, hwnd, proc, safe_title, changed, last_frame_hash, last_frame_text)
                     if saved:
                         last_frame_hash, last_frame_text = saved
-            elif changed or now - last_ocr_at >= cfg["ocr_interval_s"]:
+            elif changed or now - last_ocr_at >= ocr_every:
                 last_ocr_at = now
                 img = grab(hwnd, cfg["capture_scope"])
                 text = scrub(ocr(img))[:MAX_TEXT]

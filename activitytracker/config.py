@@ -13,6 +13,7 @@ DEFAULTS = {
     "ocr_interval_s": 2,  # without one: re-read the same window's text at most this often
     "idle_seconds": 120,  # no capture after this long without keyboard/mouse input
     "capture_scope": "window",  # "window" (focused window) or "display" (whole screen)
+    "battery_saver": True,  # on battery: capture less often, hold model summaries until plugged in (power.py)
     # ---- Pause ----
     "pause_until": 0,  # epoch seconds; 0 = not a timed pause
     "nudge_after_min": 15,  # remind me to resume after this long paused (0 = never)

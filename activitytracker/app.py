@@ -16,7 +16,7 @@ import tkinter as tk
 import webbrowser
 from tkinter import messagebox, ttk
 
-from . import (__version__, autostart, blocklist, config, ingest, keystore, models, pause, paths, store,
+from . import (__version__, autostart, blocklist, config, ingest, keystore, models, pause, paths, power, store,
                summary, ui, update, vision)
 
 log = logging.getLogger(__name__)
@@ -93,6 +93,8 @@ class App:
         self.vision = vision.VisionWorker(self.get_cfg, keystore.get)
         self.last_nudge = 0
         self.nudge_win = None
+        self._summary_held = False
+        self._battery_hold_logged = False
         self.tray = None
         self.menubar = None
         self._menu_sig = None
@@ -224,8 +226,14 @@ class App:
             if last is None:  # first run: start counting from now
                 self.state["last_period_end"] = now.isoformat()
                 self._save_state()
+            elif (now - last).total_seconds() >= interval * 60 and self._hold_for_battery():
+                # last_period_end stays put, so the summary covers this stretch once plugged in.
+                self._summary_held = True
             elif (now - last).total_seconds() >= interval * 60:
-                start = last if last and (now - last).total_seconds() < 6 * 3600 else now - dt.timedelta(minutes=interval)
+                # After a battery hold, cover the whole held stretch (still clamped to today below).
+                cap = 24 * 3600 if self._summary_held else 6 * 3600
+                start = last if last and (now - last).total_seconds() < cap else now - dt.timedelta(minutes=interval)
+                self._summary_held = False
                 if start.date() != now.date():
                     start = now.replace(hour=0, minute=0, second=0, microsecond=0)
                 if store.count_since(start) > 0:
@@ -240,6 +248,16 @@ class App:
             summary.write_summary(self.cfg, keystore.get, start, now, "the whole day", "The day")
             self.state["last_daily"] = today
             self._save_state()
+
+    def _hold_for_battery(self):
+        """Model summaries wait for the charger; the plain no-model summary is cheap and doesn't."""
+        if not self.cfg.get("battery_saver", True) or self.cfg.get("summary_engine", "off") == "off":
+            return False
+        held = power.state(config.spool_dir(self.cfg)) != power.AC
+        if held != self._battery_hold_logged:
+            self._battery_hold_logged = held
+            log.info("on battery: holding model summaries until plugged in" if held else "plugged in: summaries resume")
+        return held
 
     # ---------------- pause / resume ----------------
     def pause_for(self, minutes):
@@ -494,7 +512,7 @@ class App:
                   "retention_days", "text_retention_days", "nudge_after_min", "nudge_repeat_min"):
             v[k] = tk.IntVar()
         for k in ("capture_enabled", "diff_include_text", "nudge_timed_pauses", "start_at_login",
-                  "auto_update_check"):
+                  "auto_update_check", "battery_saver"):
             v[k] = tk.BooleanVar()
         v["capture_scope"] = tk.StringVar()
         v["sensitive_keywords"] = tk.StringVar()
@@ -566,6 +584,11 @@ class App:
         self._row(cap, "Describe at most every (s)", lambda p: ttk.Spinbox(p, from_=5, to=600, textvariable=v["frame_interval_s"], width=8),
                   "Only when a model is chosen. A window is captured again only when it changed.")
         self._row(cap, "Stop when idle for (s)", lambda p: ttk.Spinbox(p, from_=30, to=3600, textvariable=v["idle_seconds"], width=8))
+        ttk.Checkbutton(cap, text="Save battery when unplugged", variable=v["battery_saver"]).pack(anchor="w")
+        ttk.Label(cap, foreground="#666", wraplength=ui.px(820), justify="left", text=(
+            "On battery, a window you stay in is re-read every 15 s instead of every 2 s (30 s with Windows battery saver or macOS Low Power Mode on), "
+            "and model summaries wait until you plug in. Window switches are still recorded the moment they happen.")
+        ).pack(fill="x")
 
         pz = ttk.LabelFrame(f, text="Pause reminder", padding=ui.px(8))
         pz.pack(fill="x", pady=(ui.px(8), 0))
@@ -630,7 +653,7 @@ class App:
         for k in ("summary_interval_min", "daily_summary_hour", "frame_interval_s", "idle_seconds", "retention_days",
                   "text_retention_days", "nudge_after_min", "nudge_repeat_min"):
             v[k].set(int(c[k]))
-        for k in ("capture_enabled", "diff_include_text", "nudge_timed_pauses", "auto_update_check"):
+        for k in ("capture_enabled", "diff_include_text", "nudge_timed_pauses", "auto_update_check", "battery_saver"):
             v[k].set(bool(c[k]))
         v["start_at_login"].set(autostart.is_enabled())
         v["sensitive_keywords"].set(", ".join(c.get("sensitive_keywords") or []))
@@ -693,7 +716,7 @@ class App:
                 c[k] = int(v[k].get())
             except (tk.TclError, ValueError):
                 pass
-        for k in ("capture_enabled", "diff_include_text", "nudge_timed_pauses", "auto_update_check"):
+        for k in ("capture_enabled", "diff_include_text", "nudge_timed_pauses", "auto_update_check", "battery_saver"):
             c[k] = bool(v[k].get())
         c["sensitive_keywords"] = [w.strip() for w in v["sensitive_keywords"].get().split(",") if w.strip()]
         return c
@@ -719,7 +742,7 @@ class App:
         except Exception as exc:
             messagebox.showerror(APP_TITLE, "Couldn't change start-at-login: %s" % exc)
         restart = any(new[k] != self.cfg[k] for k in ("vision_mode", "frame_interval_s", "idle_seconds",
-                                                       "capture_scope", "capture_enabled"))
+                                                       "capture_scope", "capture_enabled", "battery_saver"))
         self.cfg = new
         config.save(new)
         if self.capture and restart:

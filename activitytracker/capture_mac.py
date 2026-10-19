@@ -40,6 +40,7 @@ def helper_env(cfg):
         "ACTIVITY_IDLE_SECONDS": str(cfg["idle_seconds"]),
         "ACTIVITY_CAPTURE_SCOPE": cfg["capture_scope"],
         "ACTIVITY_PARENT_PID": str(os.getpid()),
+        "ACTIVITY_POWER_AWARE": "1" if cfg.get("battery_saver", True) else "0",
     })
     return env
 

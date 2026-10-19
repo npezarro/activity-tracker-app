@@ -32,6 +32,7 @@ import Vision
 import CoreGraphics
 import ImageIO
 import ApplicationServices
+import IOKit.ps
 
 // MARK: - Config
 
@@ -80,6 +81,43 @@ let frameTextChangeRatio = envDouble("ACTIVITY_FRAME_TEXT_CHANGE_RATIO", 0.02)
 // recording), but no more often than this — otherwise rapid alt-tabbing floods the
 // vision worker's backlog and pushes real work out of it.
 let frameMinGapSeconds: TimeInterval = envDouble("ACTIVITY_FRAME_MIN_GAP", 10)
+
+// Power awareness. Plugged in, the cadence above applies unchanged. On battery the
+// expensive part (window grab + Vision OCR) runs less often and Vision uses its
+// fast recognizer; the focus poll stays at pollSeconds because it is cheap (no
+// screenshot) and is what gives window switches and dwell times their resolution.
+// A window switch still OCRs at once. Low Power Mode on battery slows OCR further.
+// The power source is re-read every powerCheckSeconds. ACTIVITY_POWER_AWARE=0
+// turns this off (full cadence on battery too).
+let powerAware = ProcessInfo.processInfo.environment["ACTIVITY_POWER_AWARE"] != "0"
+let batteryOcrIntervalSeconds: TimeInterval = envDouble("ACTIVITY_OCR_INTERVAL_BATTERY", 15)
+let lowPowerOcrIntervalSeconds: TimeInterval = envDouble("ACTIVITY_OCR_INTERVAL_LOW_POWER", 30)
+let batteryFrameIntervalSeconds: TimeInterval = envDouble("ACTIVITY_FRAME_INTERVAL_BATTERY", 60)
+let powerCheckSeconds: TimeInterval = 30
+
+enum PowerState: String { case ac, battery, lowPower = "low-power" }
+
+func readPowerState() -> PowerState {
+    guard powerAware, let snap = IOPSCopyPowerSourcesInfo()?.takeRetainedValue(),
+          let source = IOPSGetProvidingPowerSourceType(snap)?.takeUnretainedValue() else { return .ac }
+    // Desktops and an unknown source report AC => full cadence.
+    guard (source as String) == kIOPSBatteryPowerValue else { return .ac }
+    if #available(macOS 12.0, *), ProcessInfo.processInfo.isLowPowerModeEnabled { return .lowPower }
+    return .battery
+}
+
+var powerState: PowerState = .ac
+// max(): a longer interval set for plugged-in use is kept on battery too.
+var effectiveOcrInterval: TimeInterval {
+    switch powerState {
+    case .ac: return ocrIntervalSeconds
+    case .battery: return max(ocrIntervalSeconds, batteryOcrIntervalSeconds)
+    case .lowPower: return max(ocrIntervalSeconds, lowPowerOcrIntervalSeconds)
+    }
+}
+var effectiveFrameInterval: TimeInterval {
+    powerState == .ac ? frameIntervalSeconds : max(frameIntervalSeconds, batteryFrameIntervalSeconds)
+}
 
 // MARK: - Parent watch
 // Started by the app with ACTIVITY_PARENT_PID: if the app goes away (crash, force
@@ -294,8 +332,10 @@ func ocrText(_ cg: CGImage) -> String {
         }
         result = lines.joined(separator: "\n")
     }
-    request.recognitionLevel = .accurate
-    request.usesLanguageCorrection = true
+    // Fast recognizer on battery: a fraction of the Neural Engine/GPU work, a little
+    // less accurate on small or stylised text.
+    request.recognitionLevel = powerState == .ac ? .accurate : .fast
+    request.usesLanguageCorrection = powerState == .ac
 
     let handler = VNImageRequestHandler(cgImage: cg, options: [:])
     try? handler.perform([request])
@@ -537,7 +577,7 @@ func isPaused() -> Bool {
 func writeDaemonStatus() {
     let screenOk = CGPreflightScreenCaptureAccess()
     let axOk = AXIsProcessTrusted()
-    let json = "{\"screenRecording\":\(screenOk),\"accessibility\":\(axOk),\"ts\":\"\(iso.string(from: Date()))\"}"
+    let json = "{\"screenRecording\":\(screenOk),\"accessibility\":\(axOk),\"power\":\"\(powerState.rawValue)\",\"ts\":\"\(iso.string(from: Date()))\"}"
     try? json.write(toFile: "\(spoolDir)/.daemon-status", atomically: true, encoding: .utf8)
 }
 
@@ -574,6 +614,7 @@ var lastHeartbeat = Date.distantPast
 var lastFrameHash: [UInt64] = []  // avg-hash of the last saved frame (change detection)
 var lastFrameText = ""            // OCR text of the last saved frame (the primary signal)
 var lastFrameAt = Date.distantPast
+var lastPowerCheck = Date.distantPast
 
 // Heartbeat watchdog: if the main loop stops making progress (any blocking call
 // hangs despite the timeouts above), exit so the app restarts us fresh. Turns any future hang into a ~90s self-heal instead of a silent stall.
@@ -617,6 +658,18 @@ while true {
         if Date().timeIntervalSince(lastPrune) > 3600 {
             pruneOldSpoolFiles()
             lastPrune = Date()
+        }
+
+        // Power source: re-read every powerCheckSeconds; the status file carries it
+        // so the rest of the pipeline can defer optional work while on battery.
+        if Date().timeIntervalSince(lastPowerCheck) > powerCheckSeconds {
+            lastPowerCheck = Date()
+            let p = readPowerState()
+            if p != powerState {
+                powerState = p
+                FileHandle.standardError.write("[capture] power: \(p.rawValue) (OCR every \(Int(effectiveOcrInterval))s, frames every \(Int(effectiveFrameInterval))s)\n".data(using: .utf8)!)
+                writeDaemonStatus()
+            }
         }
 
         // Gate: paused, idle, or locked => write nothing.
@@ -687,12 +740,12 @@ while true {
             // Change detection still skips unchanged screens, so a static window
             // costs nothing.
             let sinceFrame = now.timeIntervalSince(lastFrameAt)
-            if sinceFrame >= frameIntervalSeconds || (windowChanged && sinceFrame >= frameMinGapSeconds) {
+            if sinceFrame >= effectiveFrameInterval || (windowChanged && sinceFrame >= frameMinGapSeconds) {
                 lastFrameAt = now
                 captureFrame(proc: app.name, title: safeTitle, windowId: app.windowId, force: windowChanged)
             }
-        } else if windowChanged || now.timeIntervalSince(lastOcrAt) >= ocrIntervalSeconds {
-            // OCR on window change, or every ocrIntervalSeconds on the same window.
+        } else if windowChanged || now.timeIntervalSince(lastOcrAt) >= effectiveOcrInterval {
+            // OCR on window change, or every effectiveOcrInterval on the same window.
             lastOcrAt = now
             let text = scrub(captureAndOcr(windowId: app.windowId))
             // Skip the write if the screen text is unchanged (cheap dedup that

@@ -40,6 +40,9 @@ are signed with the same certificate every time, so you only grant these once.
   resume. Timed pauses resume by themselves.
 - **Pause reminder**: if recording has been paused for 15 minutes (adjustable, 0 = never),
   a reminder offers to resume, and repeats every 15 minutes while you stay paused.
+- **Battery saver** (on by default): when the laptop is unplugged, a window you stay in is
+  re-read every 15 seconds instead of every 2 (30 with battery saver / Low Power Mode on),
+  and model summaries wait until you plug in. Window switches are still recorded instantly.
 - **Start at login**, **in-app updates**, portable mode (the zip keeps everything in its
   own `data` folder).
 

@@ -63,6 +63,20 @@ at any grid size, so a frame is saved when the OCR text moved by
 `ACTIVITY_FRAME_TEXT_CHANGE_RATIO` (default 0.02) — with a 16x16 average hash as
 the fallback signal for screens with no text on them (video, images, canvases).
 
+## Power (battery mode)
+
+Plugged in, capture runs at the configured cadence. On battery (setting "Save battery
+when unplugged", on by default) the expensive work (screenshot + OCR, or frames) runs
+less often and the 1 s focus poll is unchanged, so focus events and dwell times keep
+their resolution and a window switch still captures at once. Defaults: OCR every 15 s
+on battery, 30 s with Windows battery saver / macOS Low Power Mode on; frames every
+60 s; macOS also uses Vision's fast recognizer. Periodic model summaries wait for the
+charger and then cover the whole stretch. The macOS helper reads the power source
+itself (`ACTIVITY_POWER_AWARE=0` disables it) and writes `"power": "ac" | "battery" |
+"low-power"` to `.daemon-status` on every change and at least hourly; a missing field
+or a file older than 2 h means AC. On Windows the in-process capture loop asks
+`GetSystemPowerStatus` directly (`activitytracker/power.py`).
+
 ## Hard invariants (do not break these)
 
 1. **Blocklist is a capture-time guarantee, not a downstream filter.** If the
