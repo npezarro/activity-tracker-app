@@ -93,7 +93,6 @@ class App:
         self.vision = vision.VisionWorker(self.get_cfg, keystore.get)
         self.last_nudge = 0
         self.nudge_win = None
-        self._summary_held = False
         self._battery_hold_logged = False
         self.tray = None
         self.menubar = None
@@ -227,13 +226,15 @@ class App:
                 self.state["last_period_end"] = now.isoformat()
                 self._save_state()
             elif (now - last).total_seconds() >= interval * 60 and self._hold_for_battery():
-                # last_period_end stays put, so the summary covers this stretch once plugged in.
-                self._summary_held = True
+                # last_period_end stays put, so the summary covers this stretch once plugged in. The
+                # hold is saved with the state so an app restart doesn't shrink the catch-up.
+                if not self.state.get("summary_held"):
+                    self.state["summary_held"] = True
+                    self._save_state()
             elif (now - last).total_seconds() >= interval * 60:
                 # After a battery hold, cover the whole held stretch (still clamped to today below).
-                cap = 24 * 3600 if self._summary_held else 6 * 3600
+                cap = 24 * 3600 if self.state.get("summary_held") else 6 * 3600
                 start = last if last and (now - last).total_seconds() < cap else now - dt.timedelta(minutes=interval)
-                self._summary_held = False
                 if start.date() != now.date():
                     start = now.replace(hour=0, minute=0, second=0, microsecond=0)
                 if store.count_since(start) > 0:
@@ -241,6 +242,7 @@ class App:
                         start.strftime("%H:%M"), now.strftime("%H:%M")),
                         "%s to %s" % (start.strftime("%H:%M"), now.strftime("%H:%M")))
                 self.state["last_period_end"] = now.isoformat()
+                self.state.pop("summary_held", None)  # only once the held stretch is written
                 self._save_state()
         today = now.date().isoformat()
         if now.hour >= int(self.cfg.get("daily_summary_hour", 23)) and self.state.get("last_daily") != today:

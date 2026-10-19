@@ -64,7 +64,6 @@ class _FakeApp:
         from activitytracker import app
         self.cfg = cfg(summary_engine="local", daily_summary_hour=24, **kw)
         self.state = {}
-        self._summary_held = False
         self._battery_hold_logged = False
         self._summaries = app.App._summaries.__get__(self)
         self._hold_for_battery = app.App._hold_for_battery.__get__(self)
@@ -129,3 +128,41 @@ def test_daily_summary_not_blocked_by_battery_hold(monkeypatch):
     a.state["last_period_end"] = t0.isoformat()
     a._summaries(t0 + dt.timedelta(hours=1, minutes=5))
     assert written == ["The day"]  # periodic one held, the daily one still written
+
+
+def test_battery_hold_survives_app_restart(monkeypatch):
+    import datetime as dt
+    from activitytracker import app
+    written = []
+    monkeypatch.setattr(app.store, "count_since", lambda start: 1)
+    monkeypatch.setattr(app.summary, "write_summary", lambda c, k, start, end, *a: written.append((start, end)))
+    state = {"p": power.BATTERY}
+    monkeypatch.setattr(app.power, "state", lambda spool: state["p"])
+    a = _FakeApp()
+    t0 = dt.datetime(2026, 10, 19, 8, 0).astimezone()
+    a.state["last_period_end"] = t0.isoformat()
+    a._summaries(t0 + dt.timedelta(hours=2))
+    b = _FakeApp()  # restart: fresh App, same saved state
+    b.state = dict(a.state)
+    state["p"] = power.AC
+    b._summaries(t0 + dt.timedelta(hours=8))
+    assert written == [(t0, t0 + dt.timedelta(hours=8))]
+    assert "summary_held" not in b.state
+
+
+def test_failed_summary_keeps_the_hold(monkeypatch):
+    import datetime as dt
+    import pytest
+    from activitytracker import app
+    monkeypatch.setattr(app.store, "count_since", lambda start: 1)
+    monkeypatch.setattr(app.power, "state", lambda spool: power.AC)
+
+    def boom(*a):
+        raise RuntimeError("model down")
+    monkeypatch.setattr(app.summary, "write_summary", boom)
+    a = _FakeApp()
+    t0 = dt.datetime(2026, 10, 19, 8, 0).astimezone()
+    a.state.update(last_period_end=t0.isoformat(), summary_held=True)
+    with pytest.raises(RuntimeError):
+        a._summaries(t0 + dt.timedelta(hours=8))
+    assert a.state["summary_held"] and a.state["last_period_end"] == t0.isoformat()
