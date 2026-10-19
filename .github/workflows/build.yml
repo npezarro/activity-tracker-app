@@ -251,6 +251,9 @@ jobs:
           tail -20 $d/capture.log || true
           cat $d/spool/events-*.jsonl | head -8 | cut -c1-200
           grep -q '"type":"focus"' $d/spool/events-*.jsonl || { echo "no focus events captured"; exit 1; }
+          # The helper checks for its parent once per loop, and one OCR pass on a slow runner can
+          # outlast a fixed 3 s wait, so give it up to 15 s to notice and exit.
+          for i in $(seq 15); do pgrep -f "Frameworks/capture/activity-capture" >/dev/null || break; sleep 1; done
           if pgrep -f "Frameworks/capture/activity-capture" >/dev/null; then echo "helper outlived the app"; exit 1; fi
       - name: Test dmg (macOS)
         if: runner.os == 'macOS'
