@@ -68,3 +68,17 @@ def test_handle_stores_scrubbed_event(monkeypatch, tmp_path):
     desc = w.handle(cfg("local"), str(tmp_path / "f.jpg"), {"proc": "Browser", "title": "Docs", "text": "x"})
     assert desc == "Reading docs; api_key=[REDACTED]"
     assert store.latest("vision")["content"] == desc
+
+
+def test_missing_or_garbled_verdict_stays_local(monkeypatch):
+    assert vision.parse_local_eval("not json")["sensitive"] is True
+    assert vision.parse_local_eval('{"description": "Editing code"}')["sensitive"] is True
+    assert vision.parse_local_eval('{"description": "x", "sensitive": "maybe"}')["sensitive"] is True
+    assert vision.parse_local_eval('{"description": "x", "sensitive": "false"}')["sensitive"] is False
+    calls = []
+    monkeypatch.setattr(vision.models, "ollama_generate", lambda *a, **k: "I think this is a code editor")
+    monkeypatch.setattr(vision.models, "online_chat", lambda *a, **k: calls.append(1) or "online")
+    w = vision.VisionWorker(lambda: cfg("hybrid"), lambda n: "")
+    text, meta = w.describe(cfg("hybrid"), "x.jpg", "", None)
+    assert calls == [] and meta["visionSource"] == "local-sensitive"
+    assert meta["sensitiveReason"] == "no verdict from the local model"

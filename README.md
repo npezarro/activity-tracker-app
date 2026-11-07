@@ -57,7 +57,7 @@ Settings > Models has two choices.
 | Off | The timeline keeps the on-screen text, read by the OS's own OCR (Windows OCR / Apple Vision). | Nothing |
 | Local model | [Ollama](https://ollama.com) describes each capture. Run `ollama pull qwen2.5vl:3b` (fast) or `qwen2.5vl:7b` (better). | Nothing |
 | Online model | An online model describes each capture. | A screenshot of every captured window |
-| Mix | The local model sees every capture first and flags sensitive ones (passwords, bank details, private messages...). Those stay local; the rest are also described online, and the local model merges the two. If the local model isn't running, nothing is sent. | Screenshots of windows judged not sensitive |
+| Mix | The local model sees every capture first and flags sensitive ones (passwords, bank details, private messages...). Those stay local; the rest are also described online, and the local model merges the two. If the local model isn't running or gives no clear answer, nothing is sent. | Screenshots of windows judged not sensitive |
 
 Online providers: **OpenAI**, **Google Gemini**, **Groq** (API keys, stored in the system
 keychain), any **OpenAI-compatible server** (LM Studio, vLLM...), or **Codex CLI** on your

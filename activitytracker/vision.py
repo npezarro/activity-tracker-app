@@ -63,17 +63,25 @@ def with_change_context(prompt, prev_description, d):
 
 
 def parse_local_eval(raw):
+    """The local model's JSON answer. Only an explicit ``"sensitive": false`` counts as
+    not sensitive: unparseable output or a missing verdict keeps the frame on this
+    computer, so Mix mode fails closed on a bad answer as well as on no answer."""
     try:
         data = json.loads(raw)
     except (ValueError, TypeError):
         data = None
+    unknown = {"sensitive": True, "reason": "no verdict from the local model"}
     if isinstance(data, dict):
         sv = data.get("sensitive")
-        return {"description": str(data.get("description") or "").strip(),
-                "sensitive": sv is True or str(sv).lower() == "true",
-                "reason": str(data.get("reason") or "").strip(),
-                "change": str(data.get("change") or "").strip()}
-    return {"description": str(raw or "").strip(), "sensitive": False, "reason": "", "change": ""}
+        if sv is False or str(sv).strip().lower() == "false":
+            verdict = {"sensitive": False, "reason": ""}
+        elif sv is True or str(sv).strip().lower() == "true":
+            verdict = {"sensitive": True, "reason": str(data.get("reason") or "").strip()}
+        else:
+            verdict = unknown
+        return dict(verdict, description=str(data.get("description") or "").strip(),
+                    change=str(data.get("change") or "").strip())
+    return dict(unknown, description=str(raw or "").strip(), change="")
 
 
 def classify_sensitive(description, model_flag, keywords=None):
@@ -202,6 +210,8 @@ class VisionWorker:
         delta = {"delta": local["change"]} if local["change"] else {}
         sensitive, reason = classify_sensitive(local["description"], local["sensitive"],
                                                cfg.get("sensitive_keywords") or None)
+        if sensitive and local["reason"] and reason == "model-flagged":
+            reason = local["reason"]
         if sensitive:
             return (local["description"] or "(sensitive screen)",
                     dict(visionSource="local-sensitive", sensitive=True, sensitiveReason=reason, **delta))
